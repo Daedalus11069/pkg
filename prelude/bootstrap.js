@@ -32,6 +32,7 @@ const {
   gunzip,
   gunzipSync,
 } = require('zlib');
+const { resolve } = require('path');
 
 const common = {};
 REQUIRE_COMMON(common);
@@ -612,6 +613,9 @@ function payloadFileSync(pointer) {
     // writeFile:     fs.writeFile, // based on open/write/close
     readdirSync: fs.readdirSync,
     readdir: fs.readdir,
+    // My changes
+    opendirSync: fs.opendirSync,
+    // End my changes
     realpathSync: fs.realpathSync,
     realpath: fs.realpath,
     statSync: fs.statSync,
@@ -1695,6 +1699,7 @@ function payloadFileSync(pointer) {
       }
       return fd;
     };
+
     fs.promises.readFile = async function readFile(path_) {
       if (!insideSnapshot(path_)) {
         return ancestor_promises.readFile.apply(this, arguments);
@@ -1719,6 +1724,160 @@ function payloadFileSync(pointer) {
       return ancestor_promises.write.apply(this, arguments);
     };
 
+    // My changes
+
+    function getopendirFileTypes(path_, entries) {
+      return entries.map((entry) => {
+        const ff = path.join(path_, entry);
+        const entity = findVirtualFileSystemEntry(ff);
+        if (!entity) return undefined;
+        if (entity[STORE_BLOB] || entity[STORE_CONTENT])
+          return new Dirent(entry, 1);
+        if (entity[STORE_LINKS]) return new Dirent(entry, 2);
+        throw new Error('UNEXPECTED-24');
+      });
+    }
+
+    function opendirOptions(options, hasCallback) {
+      if (!options || (hasCallback && typeof options === 'function')) {
+        return { encoding: null };
+      }
+      if (typeof options === 'string') {
+        return { encoding: options };
+      }
+      if (typeof options === 'object') {
+        return options;
+      }
+      return null;
+    }
+
+    function opendirRoot(path_, options, cb) {
+      function addSnapshot(entries) {
+        if (options && options.withFileTypes) {
+          entries.push(new Dirent('snapshot', 2));
+        } else {
+          entries.push('snapshot');
+        }
+      }
+
+      if (cb) {
+        ancestor.readdir(path_, options, (error, entries) => {
+          if (error) return cb(error);
+          addSnapshot(entries);
+          cb(null, entries);
+        });
+      } else {
+        const entries = ancestor.readdirSync(path_, options);
+        addSnapshot(entries);
+        return entries;
+      }
+    }
+
+    function opendirFromSnapshotSub(entityLinks, path_, cb) {
+      if (cb) {
+        return payloadFile(entityLinks, (error, buffer) => {
+          if (error) return cb(error);
+          return cb(null, JSON.parse(buffer).concat(readdirMountpoints(path_)));
+        });
+      } else {
+        const buffer = payloadFileSync(entityLinks);
+        return JSON.parse(buffer).concat(readdirMountpoints(path_));
+      }
+    }
+
+    function opendirFromSnapshot(path_, cb) {
+      const cb2 = cb || rethrow;
+      const entity = findVirtualFileSystemEntry(path_);
+
+      if (!entity) {
+        return cb2(error_ENOENT('Directory', path_));
+      }
+
+      const entityBlob = entity[STORE_BLOB];
+      if (entityBlob) {
+        return cb2(error_ENOTDIR(path_));
+      }
+
+      const entityContent = entity[STORE_CONTENT];
+      if (entityContent) {
+        return cb2(error_ENOTDIR(path_));
+      }
+
+      const entityLinks = entity[STORE_LINKS];
+      if (entityLinks) {
+        return opendirFromSnapshotSub(entityLinks, path_, cb);
+      }
+      return cb2(new Error('UNEXPECTED-25'));
+    }
+
+    fs.promises.opendir = function opendir(path_, options_) {
+      return {
+        path: path_,
+        originalPath: path_,
+        async *[Symbol.asyncIterator]() {
+          const self = this;
+          /**
+           *
+           * @param {string} dir
+           * @returns {fs.Dirent[]}
+           */
+          function opendirApplied(dir, currentDir = {}) {
+            const dirents = fs.readdirSync(dir, {
+              withFileTypes: true,
+            });
+            return dirents.flatMap((dirent) => {
+              const res = resolve(dir, dirent.name);
+              if (dirent.isDirectory()) {
+                currentDir.dir = dirent.name;
+                return opendirApplied(res, currentDir);
+              } else {
+                dirent.name = `${currentDir.dir}/${dirent.name}`;
+                return dirent;
+              }
+            });
+          }
+
+          function od() {
+            const isRoot = isRootPath(path_);
+
+            if (!insideSnapshot(path_) && !isRoot) {
+              const files = opendirApplied(path_);
+              self.path = self.originalPath;
+              return files;
+            }
+            if (insideMountpoint(path_)) {
+              return ancestor.readdirSync.apply(
+                fs,
+                translateNth([path_, options_], 0, path_)
+              );
+            }
+
+            const options = opendirOptions(options_, false);
+
+            if (isRoot) {
+              return opendirRoot(path_, options);
+            }
+
+            if (!options) {
+              return ancestor.readdirSync.apply(fs, [path_, options_]);
+            }
+
+            let entries = opendirFromSnapshot(path_);
+
+            entries = getopendirFileTypes(path_, entries);
+            return entries;
+          }
+
+          const files = od(path_, options_);
+
+          for (let file of files) {
+            yield file;
+          }
+        },
+      };
+    };
+    // End my changes
+
     // this one use promisify on purpose
     fs.promises.readdir = util.promisify(fs.readdir);
     fs.promises.copyFile = util.promisify(fs.copyFile);
@@ -1730,7 +1889,7 @@ function payloadFileSync(pointer) {
     fs.promises.realpath = util.promisify(fs.realpath);
     fs.promises.fstat = util.promisify(fs.fstat);
     fs.promises.access = util.promisify(fs.access);
-  */
+    */
   }
 
   // ///////////////////////////////////////////////////////////////
