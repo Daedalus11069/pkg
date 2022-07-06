@@ -32,7 +32,6 @@ const {
   gunzip,
   gunzipSync,
 } = require('zlib');
-const { resolve } = require('path');
 
 const common = {};
 REQUIRE_COMMON(common);
@@ -1826,7 +1825,7 @@ function payloadFileSync(pointer) {
               withFileTypes: true,
             });
             return dirents.flatMap((dirent) => {
-              const res = resolve(dir, dirent.name);
+              const res = path.resolve(dir, dirent.name);
               if (dirent.isDirectory()) {
                 currentDir.dir = dirent.name;
                 return opendirApplied(res, currentDir);
